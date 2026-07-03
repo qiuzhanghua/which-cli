@@ -16,7 +16,7 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             arch: amd64
-          - target: aarch64-pc-windows-gnu
+          - target: aarch64-pc-windows-msvc
             arch: arm64
     runs-on: windows-latest
     steps:
@@ -27,8 +27,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # ARM64 GNU target 使用 rust-lld 作为链接器，避免安装 MinGW
-      - name: Add llvm-tools for ARM64 cross-compile
+      # AMD64: 原生 MSVC 编译，零配置
+      - name: Build (AMD64)
+        if: matrix.arch == 'amd64'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # ARM64: 需要 llvm-tools (提供 lld-link) + cargo-xwin (提供 ARM64 CRT/SDK)
+      - name: Install ARM64 cross-compile tools
+        if: matrix.arch == 'arm64'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      - name: Add llvm-tools for ARM64 linker
         if: matrix.arch == 'arm64'
         run: rustup component add llvm-tools
 
@@ -40,10 +51,9 @@ jobs:
           HOST="$(rustc -vV | grep host | cut -d' ' -f2)"
           echo "${SYSROOT}/lib/rustlib/${HOST}/bin" >> "$GITHUB_PATH"
 
-      - name: Build
-        env:
-          CARGO_TARGET_AARCH64_PC_WINDOWS_GNU_LINKER: rust-lld
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Build (ARM64)
+        if: matrix.arch == 'arm64'
+        run: cargo xwin build --release --target ${{ matrix.target }}
 
       - name: Extract version
         id: version
