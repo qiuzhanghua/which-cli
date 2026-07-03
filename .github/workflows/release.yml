@@ -6,16 +6,20 @@ on:
       - 'v*'
 
 jobs:
+  # 1. 构建作业：只负责编译和上传工作流附件
   build:
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            binary: which  # Linux/macOS 可执行文件无后缀
           - os: macos-latest
             target: aarch64-apple-darwin
+            binary: which
           - os: windows-latest
             target: x86_64-pc-windows-gnu
+            binary: which.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -27,14 +31,27 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: which-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/which.exe
-      - name: Create Release and Upload Assets
+          name: which-${{ matrix.target }}  # 每个平台保存为独立的附件
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+
+  # 2. 发布作业：等待所有构建完成，下载附件并统一发布
+  create-release:
+    needs: build  # 等待 build 作业成功完成
+    runs-on: ubuntu-latest  # 在任意一个干净环境中运行即可
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts  # 下载到 artifacts 目录
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+        shell: bash
+
+      - name: Create Release and Upload All Assets
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            target/${{ matrix.target }}/release/which.exe
-            # 对于 Linux/macOS 可执行文件，路径通常没有 .exe 后缀
-            # target/${{ matrix.target }}/release/which
+          # 上传 artifacts 目录下的所有文件
+          files: artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
