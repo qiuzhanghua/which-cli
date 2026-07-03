@@ -70,7 +70,7 @@ jobs:
           ARCH="${{ matrix.arch }}"
           BIN="which-${VER}-windows-${ARCH}.exe"
           mv "target/${{ matrix.target }}/release/which.exe" "${BIN}"
-          echo "asset_name=${BIN}" >> $GITHUB_OUTPUT
+          echo "asset_name=${BIN}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
