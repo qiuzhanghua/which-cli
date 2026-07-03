@@ -6,102 +6,160 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
+  attestations: write
+  id-token: write
 
 jobs:
-  # 1. 构建作业：只负责编译和上传工作流附件
-  build:
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            arch: amd64
-          - target: aarch64-pc-windows-msvc
-            arch: arm64
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      # AMD64: 原生 MSVC 编译，零配置
-      - name: Build (AMD64)
-        if: matrix.arch == 'amd64'
-        run: cargo build --release --target ${{ matrix.target }}
-
-      # ARM64: 需要 llvm-tools (提供 lld-link) + cargo-xwin (提供 ARM64 CRT/SDK)
-      - name: Install ARM64 cross-compile tools
-        if: matrix.arch == 'arm64'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-xwin
-
-      - name: Add llvm-tools for ARM64 linker
-        if: matrix.arch == 'arm64'
-        run: rustup component add llvm-tools
-
-      - name: Add rust-lld to PATH (ARM64 only)
-        if: matrix.arch == 'arm64'
-        shell: bash
-        run: |
-          SYSROOT="$(rustc --print sysroot)"
-          HOST="$(rustc -vV | grep host | cut -d' ' -f2)"
-          echo "${SYSROOT}/lib/rustlib/${HOST}/bin" >> "$GITHUB_PATH"
-
-      - name: Build (ARM64)
-        if: matrix.arch == 'arm64'
-        run: cargo xwin build --release --target ${{ matrix.target }}
-
-      - name: Extract version
-        id: version
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Rename binary
-        id: rename
-        shell: bash
-        run: |
-          VER="${{ steps.version.outputs.version }}"
-          ARCH="${{ matrix.arch }}"
-          BIN="which-${VER}-windows-${ARCH}.exe"
-          mv "target/${{ matrix.target }}/release/which.exe" "${BIN}"
-          echo "asset_name=${BIN}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: which-${{ steps.version.outputs.version }}-windows-${{ matrix.arch }}
-          path: ${{ steps.rename.outputs.asset_name }}
-
-      # 验证产物存在
-      - name: Verify binary
-        shell: bash
-        run: |
-          file "${{ steps.rename.outputs.asset_name }}" || true
-          ls -lh "${{ steps.rename.outputs.asset_name }}"
-
-  # 2. 发布作业：等待所有构建完成，下载附件并统一发布
-  release:
-    needs: build
+  crate_metadata:
+    name: Extract crate metadata
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7.0.0
         with:
-          path: artifacts
-          merge-multiple: true
+          persist-credentials: false
+      - name: Extract crate information
+        id: crate_metadata
+        run: |
+          echo "name=which" | tee -a $GITHUB_OUTPUT
+          cargo metadata --no-deps --format-version 1 | jq -r '"version=" + .packages[0].version' | tee -a $GITHUB_OUTPUT
+    outputs:
+      name: ${{ steps.crate_metadata.outputs.name }}
+      version: ${{ steps.crate_metadata.outputs.version }}
 
-      - name: List artifacts
-        run: ls -lh artifacts/
-
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v2
+  build:
+    name: '${{ matrix.job.target }} (${{ matrix.job.os }})'
+    runs-on: ${{ matrix.job.os }}
+    needs: crate_metadata
+    permissions:
+      id-token: write
+      contents: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { target: aarch64-unknown-linux-gnu   , os: ubuntu-24.04, use-cross: true }
+          - { target: aarch64-unknown-linux-musl  , os: ubuntu-24.04, use-cross: true }
+          - { target: i686-pc-windows-msvc        , os: windows-2025                  }
+          - { target: i686-unknown-linux-gnu      , os: ubuntu-24.04, use-cross: true }
+          - { target: i686-unknown-linux-musl     , os: ubuntu-24.04, use-cross: true }
+          - { target: x86_64-apple-darwin         , os: macos-26-intel                }
+          - { target: aarch64-apple-darwin        , os: macos-26                      }
+          - { target: x86_64-pc-windows-gnu       , os: windows-2025                  }
+          - { target: x86_64-pc-windows-msvc      , os: windows-2025                  }
+          - { target: aarch64-pc-windows-msvc     , os: windows-11-arm                }
+          - { target: x86_64-unknown-linux-gnu    , os: ubuntu-24.04, use-cross: true }
+          - { target: x86_64-unknown-linux-musl   , os: ubuntu-24.04, use-cross: true }
+    env:
+      BUILD_CMD: "${{ matrix.job.use-cross && 'cross' || 'cargo' }}"
+      target: ${{ matrix.job.target }}
+      name: ${{ needs.crate_metadata.outputs.name }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7.0.0
         with:
-          files: artifacts/which-*.exe
+          persist-credentials: false
+
+      - name: Install prerequisites
+        shell: bash
+        run: |
+          case ${target} in
+            aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
+          esac
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.job.target }}
+          toolchain: "stable"
+
+      - name: Install cross
+        if: matrix.job.use-cross
+        env:
+          cross_version: "v0.2.5"
+          package_name: "cross-x86_64-unknown-linux-gnu.tar.gz"
+          GH_TOKEN: "${{ github.token }}"
+        run: |
+          dir="$HOME/.local/bin/"
+          mkdir -p "$dir"
+          gh release download --repo cross-rs/cross \
+            --pattern "${package_name}" -O - "${cross_version}" \
+            | tar -C "$dir" -xz
+          echo "$dir" >> $GITHUB_PATH
+
+      - name: Build
+        shell: bash
+        run: $BUILD_CMD build --locked --release --target="${target}"
+
+      - name: Set binary name & path
+        id: bin
+        shell: bash
+        run: |
+          EXE_suffix=""
+          case ${target} in
+            *-pc-windows-*) EXE_suffix=".exe" ;;
+          esac;
+
+          BIN_NAME="${name}${EXE_suffix}"
+          BIN_PATH="target/${target}/release/${BIN_NAME}"
+
+          echo "BIN_PATH=${BIN_PATH}" >> $GITHUB_OUTPUT
+          echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create tarball
+        id: package
+        shell: bash
+        env:
+          BIN_PATH: ${{ steps.bin.outputs.BIN_PATH }}
+          version: ${{ needs.crate_metadata.outputs.version }}
+        run: |
+          PKG_suffix=".tar.gz"
+          case ${target} in
+            *-pc-windows-*) PKG_suffix=".zip" ;;
+          esac
+          PKG_BASENAME=${name}-v${version}-${target}
+          PKG_NAME=${PKG_BASENAME}${PKG_suffix}
+          echo "PKG_NAME=${PKG_NAME}" >> $GITHUB_OUTPUT
+
+          PKG_STAGING="_release-intermediates/package"
+          ARCHIVE_DIR="${PKG_STAGING}/${PKG_BASENAME}/"
+          mkdir -p "${ARCHIVE_DIR}"
+
+          cp "${BIN_PATH}" "$ARCHIVE_DIR"
+
+          case ${target} in
+            *-pc-windows-*) 7z -y a "${PKG_STAGING}/${PKG_NAME}" "${PKG_BASENAME}"/* | tail -2 ;;
+            *) tar czf "${PKG_STAGING}/${PKG_NAME}" "${PKG_BASENAME}"/* ;;
+          esac;
+
+          echo "PKG_PATH=${PKG_STAGING}/${PKG_NAME}" >> $GITHUB_OUTPUT
+
+      - name: "Artifact upload: tarball"
+        id: upload-tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.package.outputs.PKG_NAME }}
+          path: ${{ steps.package.outputs.PKG_PATH }}
+          compression-level: 0
+
+      - name: Check for release
+        id: is-release
+        shell: bash
+        run: |
+          unset IS_RELEASE ; if [[ $GITHUB_REF =~ ^refs/tags/v[0-9].* ]]; then IS_RELEASE='true' ; fi
+          echo "IS_RELEASE=${IS_RELEASE}" >> $GITHUB_OUTPUT
+
+      - name: "Attest artifacts"
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        if: steps.is-release.outputs.IS_RELEASE
+        with:
+          subject-path: ${{ steps.package.outputs.PKG_PATH }}
+
+      - name: Publish archives and packages
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        if: steps.is-release.outputs.IS_RELEASE
+        with:
+          files: ${{ steps.package.outputs.PKG_PATH }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
