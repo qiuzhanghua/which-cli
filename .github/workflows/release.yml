@@ -29,3 +29,12 @@ jobs:
         with:
           name: which-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/which.exe
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            target/${{ matrix.target }}/release/which.exe
+            # 对于 Linux/macOS 可执行文件，路径通常没有 .exe 后缀
+            # target/${{ matrix.target }}/release/which
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
